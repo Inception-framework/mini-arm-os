@@ -1,0 +1,1320 @@
+From dacae864ced66174409333682cde163333754b87 Mon Sep 17 00:00:00 2001
+From: Giovanni Camurati <camurati@eurecom.fr>
+Date: Thu, 8 Feb 2018 14:12:39 +0100
+Subject: [PATCH 6/6] example of CFI
+
+---
+ 13-CorruptContext/Makefile       |   46 +
+ 13-CorruptContext/config.json    |  138 ++
+ 13-CorruptContext/log            | 4595 ++++++++++++++++++++++++++++++++++++++
+ 13-CorruptContext/malloc.c       |   99 +
+ 13-CorruptContext/malloc.h       |    7 +
+ 13-CorruptContext/my_malloc.c    |  102 +
+ 13-CorruptContext/my_malloc.h    |    7 +
+ 13-CorruptContext/os.c           |  142 ++
+ 13-CorruptContext/os.h           |    8 +
+ 13-CorruptContext/os.ld          |   46 +
+ 13-CorruptContext/reg.h          |   56 +
+ 13-CorruptContext/registers.dump |  147 ++
+ 13-CorruptContext/startup.c      |  162 ++
+ 13-CorruptContext/threads.c      |  158 ++
+ 13-CorruptContext/threads.h      |   11 +
+ 13-CorruptContext/version.md     |    5 +
+ "13-CorruptContext/\303\271"     |   46 +
+ 17 files changed, 5775 insertions(+)
+ create mode 100644 13-CorruptContext/Makefile
+ create mode 100644 13-CorruptContext/config.json
+ create mode 100644 13-CorruptContext/log
+ create mode 100644 13-CorruptContext/malloc.c
+ create mode 100644 13-CorruptContext/malloc.h
+ create mode 100644 13-CorruptContext/my_malloc.c
+ create mode 100644 13-CorruptContext/my_malloc.h
+ create mode 100644 13-CorruptContext/os.c
+ create mode 100644 13-CorruptContext/os.h
+ create mode 100644 13-CorruptContext/os.ld
+ create mode 100644 13-CorruptContext/reg.h
+ create mode 100644 13-CorruptContext/registers.dump
+ create mode 100644 13-CorruptContext/startup.c
+ create mode 100644 13-CorruptContext/threads.c
+ create mode 100644 13-CorruptContext/threads.h
+ create mode 100644 13-CorruptContext/version.md
+ create mode 100644 "13-CorruptContext/\303\271"
+
+diff --git a/13-CorruptContext/Makefile b/13-CorruptContext/Makefile
+new file mode 100644
+index 0000000..c0fe8f0
+--- /dev/null
++++ b/13-CorruptContext/Makefile
+@@ -0,0 +1,46 @@
++CROSS_COMPILE ?= arm-none-eabi-
++CC := $(CROSS_COMPILE)gcc
++AS := $(CROSS_COMPILE)as
++CFLAGS = -fno-common -ffreestanding -O0 \
++	 -gdwarf-2 -g3 -Wall -Werror \
++	 -mcpu=cortex-m3 -mthumb \
++	 -Wl,-Tos.ld -nostartfiles \
++         -I.
++
++DET_ALLOC_START = 0xf0000000
++
++TARGET = os
++
++LLVM-AS = llvm-as
++INCEPTION-CL = inception-cl
++CLANG = clang
++CLANG_FLAGS = -mthumb --target=thumbv7m-eabi -mcpu=cortex-m3
++CLANG_FLAGS += -I. -emit-llvm -g -S -DKLEE
++LLVM-LINK = llvm-link
++
++all: $(TARGET).bin $(TARGET)_merged.bc
++
++$(TARGET).bin: os.c startup.c malloc.c threads.c
++	$(CC) $(CFLAGS) $^ -o os.elf
++	$(CROSS_COMPILE)objcopy -Obinary os.elf os.bin
++	$(CROSS_COMPILE)objdump -S os.elf > os.list
++
++$(TARGET)_merged.bc: $(TARGET).bin
++	$(CLANG) $(CLANG_FLAGS)  os.c startup.c malloc.c threads.c
++	$(LLVM-LINK) -S os.ll startup.ll malloc.ll threads.ll -o $(TARGET).ll
++	$(LLVM-AS) $(TARGET).ll -o $(TARGET).bc
++	$(INCEPTION-CL) $(INCEPTION_FLAGS) $(TARGET).elf $(TARGET).bc
++	$(LLVM-AS) $(TARGET).elf.ll -o $(TARGET)_merged.bc
++
++qemu: $(TARGET)
++	@qemu-system-arm -M ? | grep stm32-p103 >/dev/null || exit
++	@echo "Press Ctrl-A and then X to exit QEMU"
++	@echo
++	qemu-system-arm -M stm32-p103 -nographic -kernel os.bin
++
++clean:
++	rm -f *.o *.elf *.bin *.list *.elf.ll *.ll *.bc *.dis
++	rm -rf klee*
++
++run-klee: $(TARGET)_merged.bc
++	klee -search=bfs --allocate-determ --allocate-determ-start-address $(DET_ALLOC_START) $(TARGET)_merged.bc
+diff --git a/13-CorruptContext/config.json b/13-CorruptContext/config.json
+new file mode 100644
+index 0000000..2667bce
+--- /dev/null
++++ b/13-CorruptContext/config.json
+@@ -0,0 +1,138 @@
++{
++    "Board" : "STM32L152RE Nucleo",
++    "Analyzer" : [
++      { "Redirection": 0 },
++      { "DynamicInterruptTable": 1 },
++      { "Debugger"   : 0 }
++    ],
++    "RealMemory" : [
++      { "name": "PERIPH_BB_ALIAS_1", "address" : "42470000", "size": "4", "Access": "0"},
++      { "name": "PERIPH_BB_ALIAS_2", "address" : "42470060", "size": "4", "Access": "0"},
++      { "name": "SCU",    "address" : "E000ED00", "size": "E4", "Access": "0"},
++      { "name": "NVIC",   "address" : "E000E100", "size": "E04", "Access": "0"},
++      { "name": "Systick","address" : "E000E010", "size": "10", "Access": "0"},
++      { "name": "FSMC",   "address" : "A0000000", "size": "FFF", "Access": "0"},
++      { "name": "AES" ,   "address" : "50060000", "size": "3FF", "Access": "0"},
++      { "name": "DMA2",   "address" : "40026400", "size": "3FF", "Access": "0"},
++      { "name": "DMA1",   "address" : "40026000", "size": "3FF", "Access": "0"},
++      { "name": "FLASH",  "address" : "40023C00", "size": "3FF", "Access": "0"},
++      { "name": "RCC",    "address" : "40023800", "size": "3FF", "Access": "0"},
++      { "name": "CRC",    "address" : "40023000", "size": "3FF", "Access": "0"},
++      { "name": "GPIOG",  "address" : "40021C00", "size": "3FF", "Access": "0"},
++      { "name": "GPIOF",  "address" : "40021800", "size": "3FF", "Access": "0"},
++      { "name": "GPIOH",  "address" : "40021400", "size": "3FF", "Access": "0"},
++      { "name": "GPIOE",  "address" : "40021000", "size": "3FF", "Access": "0"},
++      { "name": "GPIOD",  "address" : "40020C00", "size": "3FF", "Access": "0"},
++      { "name": "GPIOC",  "address" : "40020800", "size": "3FF", "Access": "0"},
++      { "name": "GPIOB",  "address" : "40020400", "size": "3FF", "Access": "0"},
++      { "name": "GPIOA",  "address" : "40020000", "size": "3FF", "Access": "0"},
++      { "name": "USART1", "address" : "40013800", "size": "3FF", "Access": "0"},
++      { "name": "SPI1",   "address" : "40013000", "size": "3FF", "Access": "0"},
++      { "name": "SDIO",   "address" : "40012C00", "size": "3FF", "Access": "0"},
++      { "name": "ADC",    "address" : "40012400", "size": "3FF", "Access": "0"},
++      { "name": "TIM11",  "address" : "40011000", "size": "3FF", "Access": "0"},
++      { "name": "TIM10",  "address" : "40010C00", "size": "3FF", "Access": "0"},
++      { "name": "TIM9",   "address" : "40010800", "size": "3FF", "Access": "0"},
++      { "name": "EXTI",   "address" : "40010400", "size": "3FF", "Access": "0"},
++      { "name": "SYSCFG", "address" : "40010000", "size": "3FF", "Access": "0"},
++      { "name": "COMP",   "address" : "40007C00", "size": "003", "Access": "0"},
++      { "name": "RI",     "address" : "40007C04", "size": "057", "Access": "0"},
++      { "name": "OPAMP",  "address" : "40007C5C", "size": "3A3", "Access": "0"},
++      { "name": "DAC",    "address" : "40007400", "size": "3FF", "Access": "0"},
++      { "name": "PWR",    "address" : "40007000", "size": "3FF", "Access": "0"},
++      { "name": "USB device FS SRAM 512 bytes", "address" : "40006000", "size": "3FF", "Access": "0"},
++      { "name": "USB device FS",                "address" : "40005C00", "size": "3FF", "Access": "0"},
++      { "name": "I2C2",   "address" : "40005800", "size": "3FF", "Access": "0"},
++      { "name": "I2C1",   "address" : "40005400", "size": "3FF", "Access": "0"},
++      { "name": "USART5", "address" : "40005000", "size": "3FF", "Access": "0"},
++      { "name": "USART4", "address" : "40004C00", "size": "3FF", "Access": "0"},
++      { "name": "USART3", "address" : "40004800", "size": "3FF", "Access": "0"},
++      { "name": "USART2", "address" : "40004400", "size": "3FF", "Access": "0"},
++      { "name": "SPI3",   "address" : "40003C00", "size": "3FF", "Access": "0"},
++      { "name": "SPI2",   "address" : "40003800", "size": "3FF", "Access": "0"},
++      { "name": "IWDG",   "address" : "40003000", "size": "3FF", "Access": "0"},
++      { "name": "WWDG",   "address" : "40002C00", "size": "3FF", "Access": "0"},
++      { "name": "RTC",    "address" : "40002800", "size": "3FF", "Access": "0"},
++      { "name": "LCD",    "address" : "40002400", "size": "3FF", "Access": "0"},
++      { "name": "TIM7",   "address" : "40001400", "size": "3FF", "Access": "0"},
++      { "name": "TIM6",   "address" : "40001000", "size": "3FF", "Access": "0"},
++      { "name": "TIM5",   "address" : "40000C00", "size": "3FF", "Access": "0"},
++      { "name": "TIM4",   "address" : "40000800", "size": "3FF", "Access": "0"},
++      { "name": "TIM3",   "address" : "40000400", "size": "3FF", "Access": "0"},
++      { "name": "TIM2",   "address" : "40000000", "size": "3FF", "Access": "0"}
++    ],
++    "RealInterrupt" : [
++      { "name" : "Reset_Handler" , "id" : 1 , "priority_g" : "0", "priority": "0", "handler": "Reset_Handler" },
++      { "name" : "NMI_Handler" , "id" : 2 , "priority_g" : "0", "priority": "0", "handler": "NMI_Handler" },
++      { "name" : "HardFault_Handler" , "id" : 3 , "priority_g" : "0", "priority": "0", "handler": "HardFault_Handler" },
++      { "name" : "MemManage_Handler" , "id" : 4 , "priority_g" : "0", "priority": "0", "handler": "MemManage_Handler" },
++      { "name" : "BusFault_Handler" , "id" : 5 , "priority_g" : "0", "priority": "0", "handler": "BusFault_Handler" },
++      { "name" : "UsageFault_Handler" , "id" : 6 , "priority_g" : "0", "priority": "0", "handler": "UsageFault_Handler" },
++      { "name" : "SVC_Handler" , "id" : 11 , "priority_g" : "0", "priority": "0", "handler": "SVC_Handler" },
++      { "name" : "DebugMon_Handler" , "id" : 12 , "priority_g" : "0", "priority": "0", "handler": "DebugMon_Handler" },
++      { "name" : "PendSV_Handler" , "id" : 14 , "priority_g" : "0", "priority": "0", "handler": "PendSV_Handler" },
++      { "name" : "SysTick_Handler" , "id" : 15 , "priority_g" : "0", "priority": "0", "handler": "SysTick_Handler" },
++      { "name" : "WWDG_IRQHandler" , "id" : 16 , "priority_g" : "0", "priority": "0", "handler": "WWDG_IRQHandler" },
++      { "name" : "PVD_IRQHandler" , "id" : 17 , "priority_g" : "0", "priority": "0", "handler": "PVD_IRQHandler" },
++      { "name" : "TAMPER_STAMP_IRQHandler" , "id" : 18 , "priority_g" : "0", "priority": "0", "handler": "TAMPER_STAMP_IRQHandler" },
++      { "name" : "RTC_WKUP_IRQHandler" , "id" : 19 , "priority_g" : "0", "priority": "0", "handler": "RTC_WKUP_IRQHandler" },
++      { "name" : "FLASH_IRQHandler" , "id" : 20 , "priority_g" : "0", "priority": "0", "handler": "FLASH_IRQHandler" },
++      { "name" : "RCC_IRQHandler" , "id" : 21 , "priority_g" : "0", "priority": "0", "handler": "RCC_IRQHandler" },
++      { "name" : "EXTI0_IRQHandler" , "id" : 22 , "priority_g" : "0", "priority": "0", "handler": "EXTI0_IRQHandler" },
++      { "name" : "EXTI1_IRQHandler" , "id" : 23 , "priority_g" : "0", "priority": "0", "handler": "EXTI1_IRQHandler" },
++      { "name" : "EXTI2_IRQHandler" , "id" : 24 , "priority_g" : "0", "priority": "0", "handler": "EXTI2_IRQHandler" },
++      { "name" : "EXTI3_IRQHandler" , "id" : 25 , "priority_g" : "0", "priority": "0", "handler": "EXTI3_IRQHandler" },
++      { "name" : "EXTI4_IRQHandler" , "id" : 26 , "priority_g" : "0", "priority": "0", "handler": "EXTI4_IRQHandler" },
++      { "name" : "DMA1_Channel1_IRQHandler" , "id" : 27 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel1_IRQHandler" },
++      { "name" : "DMA1_Channel2_IRQHandler" , "id" : 28 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel2_IRQHandler" },
++      { "name" : "DMA1_Channel3_IRQHandler" , "id" : 29 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel3_IRQHandler" },
++      { "name" : "DMA1_Channel4_IRQHandler" , "id" : 30 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel4_IRQHandler" },
++      { "name" : "DMA1_Channel5_IRQHandler" , "id" : 31 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel5_IRQHandler" },
++      { "name" : "DMA1_Channel6_IRQHandler" , "id" : 32 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel6_IRQHandler" },
++      { "name" : "DMA1_Channel7_IRQHandler" , "id" : 33 , "priority_g" : "0", "priority": "0", "handler": "DMA1_Channel7_IRQHandler" },
++      { "name" : "ADC1_IRQHandler" , "id" : 34 , "priority_g" : "0", "priority": "0", "handler": "ADC1_IRQHandler" },
++      { "name" : "USB_HP_IRQHandler" , "id" : 35 , "priority_g" : "0", "priority": "0", "handler": "USB_HP_IRQHandler" },
++      { "name" : "USB_LP_IRQHandler" , "id" : 36 , "priority_g" : "0", "priority": "0", "handler": "USB_LP_IRQHandler" },
++      { "name" : "DAC_IRQHandler" , "id" : 37 , "priority_g" : "0", "priority": "0", "handler": "DAC_IRQHandler" },
++      { "name" : "COMP_IRQHandler" , "id" : 38 , "priority_g" : "0", "priority": "0", "handler": "COMP_IRQHandler" },
++      { "name" : "EXTI9_5_IRQHandler" , "id" : 39 , "priority_g" : "0", "priority": "0", "handler": "EXTI9_5_IRQHandler" },
++      { "name" : "LCD_IRQHandler" , "id" : 40 , "priority_g" : "0", "priority": "0", "handler": "LCD_IRQHandler" },
++      { "name" : "TIM9_IRQHandler" , "id" : 41 , "priority_g" : "0", "priority": "0", "handler": "TIM9_IRQHandler" },
++      { "name" : "TIM10_IRQHandler" , "id" : 42 , "priority_g" : "0", "priority": "0", "handler": "TIM10_IRQHandler" },
++      { "name" : "TIM11_IRQHandler" , "id" : 43 , "priority_g" : "0", "priority": "0", "handler": "TIM11_IRQHandler" },
++      { "name" : "TIM2_IRQHandler" , "id" : 44 , "priority_g" : "0", "priority": "0", "handler": "TIM2_IRQHandler" },
++      { "name" : "TIM3_IRQHandler" , "id" : 45 , "priority_g" : "0", "priority": "0", "handler": "TIM3_IRQHandler" },
++      { "name" : "TIM4_IRQHandler" , "id" : 46 , "priority_g" : "0", "priority": "0", "handler": "TIM4_IRQHandler" },
++      { "name" : "I2C1_EV_IRQHandler" , "id" : 47 , "priority_g" : "0", "priority": "0", "handler": "I2C1_EV_IRQHandler" },
++      { "name" : "I2C1_ER_IRQHandler" , "id" : 48 , "priority_g" : "0", "priority": "0", "handler": "I2C1_ER_IRQHandler" },
++      { "name" : "I2C2_EV_IRQHandler" , "id" : 49 , "priority_g" : "0", "priority": "0", "handler": "I2C2_EV_IRQHandler" },
++      { "name" : "I2C2_ER_IRQHandler" , "id" : 50 , "priority_g" : "0", "priority": "0", "handler": "I2C2_ER_IRQHandler" },
++      { "name" : "SPI1_IRQHandler" , "id" : 51 , "priority_g" : "0", "priority": "0", "handler": "SPI1_IRQHandler" },
++      { "name" : "SPI2_IRQHandler" , "id" : 52 , "priority_g" : "0", "priority": "0", "handler": "SPI2_IRQHandler" },
++      { "name" : "USART1_IRQHandler" , "id" : 53 , "priority_g" : "0", "priority": "0", "handler": "USART1_IRQHandler" },
++      { "name" : "USART2_IRQHandler" , "id" : 54 , "priority_g" : "0", "priority": "0", "handler": "USART2_IRQHandler" },
++      { "name" : "USART3_IRQHandler" , "id" : 55 , "priority_g" : "0", "priority": "0", "handler": "USART3_IRQHandler" },
++      { "name" : "EXTI15_10_IRQHandler" , "id" : 56 , "priority_g" : "0", "priority": "0", "handler": "EXTI15_10_IRQHandler" },
++      { "name" : "RTC_Alarm_IRQHandler" , "id" : 57 , "priority_g" : "0", "priority": "0", "handler": "RTC_Alarm_IRQHandler" },
++      { "name" : "USB_FS_WKUP_IRQHandler" , "id" : 58 , "priority_g" : "0", "priority": "0", "handler": "USB_FS_WKUP_IRQHandler" },
++      { "name" : "TIM6_IRQHandler" , "id" : 59 , "priority_g" : "0", "priority": "0", "handler": "TIM6_IRQHandler" },
++      { "name" : "TIM7_IRQHandler" , "id" : 60 , "priority_g" : "0", "priority": "0", "handler": "TIM7_IRQHandler" },
++      { "name" : "TIM5_IRQHandler" , "id" : 62 , "priority_g" : "0", "priority": "0", "handler": "TIM5_IRQHandler" },
++      { "name" : "SPI3_IRQHandler" , "id" : 63 , "priority_g" : "0", "priority": "0", "handler": "SPI3_IRQHandler" },
++      { "name" : "UART4_IRQHandler" , "id" : 64 , "priority_g" : "0", "priority": "0", "handler": "UART4_IRQHandler" },
++      { "name" : "UART5_IRQHandler" , "id" : 65 , "priority_g" : "0", "priority": "0", "handler": "UART5_IRQHandler" },
++      { "name" : "DMA2_Channel1_IRQHandler" , "id" : 66 , "priority_g" : "0", "priority": "0", "handler": "DMA2_Channel1_IRQHandler" },
++      { "name" : "DMA2_Channel2_IRQHandler" , "id" : 67 , "priority_g" : "0", "priority": "0", "handler": "DMA2_Channel2_IRQHandler" },
++      { "name" : "DMA2_Channel3_IRQHandler" , "id" : 68 , "priority_g" : "0", "priority": "0", "handler": "DMA2_Channel3_IRQHandler" },
++      { "name" : "DMA2_Channel4_IRQHandler" , "id" : 69 , "priority_g" : "0", "priority": "0", "handler": "DMA2_Channel4_IRQHandler" },
++      { "name" : "DMA2_Channel5_IRQHandler" , "id" : 70 , "priority_g" : "0", "priority": "0", "handler": "DMA2_Channel5_IRQHandler" },
++      { "name" : "COMP_ACQ_IRQHandler" , "id" : 72 , "priority_g" : "0", "priority": "0", "handler": "COMP_ACQ_IRQHandler" },
++      { "name" : "BootRAM" , "id" : 78 , "priority_g" : "0", "priority": "0", "handler": "BootRAM" }
++    ],
++    "Stub" : [
++      { "address": "20004000"}
++    ],
++    "Binary" : [
++      { "Path": "os.elf"}
++    ]
++}
+diff --git a/13-CorruptContext/malloc.c b/13-CorruptContext/malloc.c
+new file mode 100644
+index 0000000..6bb3206
+--- /dev/null
++++ b/13-CorruptContext/malloc.c
+@@ -0,0 +1,99 @@
++#include <stddef.h>
++#include "malloc.h"
++#include "os.h"
++
++typedef long Align;
++
++union header {
++	struct {
++		union header *ptr;
++		unsigned int size;
++	} s;
++	Align x;
++};
++
++typedef union header Header;
++
++static unsigned char heaps[MAX_HEAPS];
++static unsigned char *program_break = heaps;
++
++static Header base; /* empty list to get started */
++static Header *freep = NULL; /* start of free list */
++
++static void *sbrk(unsigned int nbytes)
++{
++	if (program_break + nbytes >= heaps
++	    && program_break + nbytes < heaps + MAX_HEAPS) {
++		unsigned char *previous_pb = program_break;
++		program_break += nbytes;
++		return (void *) previous_pb;
++	}
++	return (void *) -1;
++}
++
++void *malloc(unsigned int nbytes)
++{
++	Header *p, *prevp;
++	unsigned int nunits;
++	void *cp;
++
++	nunits = (nbytes + sizeof(Header) - 1) / sizeof(Header) + 1;
++
++	if ((prevp = freep) == NULL) {
++		base.s.ptr = freep = prevp = &base;
++		base.s.size = 0;
++	}
++
++	for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {
++		if (p->s.size >= nunits) {
++			if (p->s.size == nunits) {
++				prevp->s.ptr = p->s.ptr;
++			} else {
++				p->s.size -= nunits;
++				p += p->s.size;
++				p->s.size = nunits;
++			}
++			freep = prevp;
++			return (void *)(p + 1);
++		}
++
++		if (p == freep) {
++			cp = sbrk(nunits * sizeof(Header));
++			if (cp == (void *) -1) {
++				return NULL;
++			} else {
++				p = (Header *) cp;
++				p->s.size = nunits;
++				free((void *) (p + 1));
++				p = freep;
++			}
++		}
++	}
++}
++
++void free(void *ap)
++{
++	Header *bp, *p;
++	bp = (Header *) ap - 1;
++
++	for (p = freep; !(bp > p && bp < p->s.ptr); p = p->s.ptr) {
++		if (p >= p->s.ptr && (bp > p || bp < p->s.ptr))
++			break;
++	}
++
++	if (bp + bp->s.size == p->s.ptr) {
++		bp->s.size += p->s.ptr->s.size;
++		bp->s.ptr = p->s.ptr->s.ptr;
++	} else {
++		bp->s.ptr = p->s.ptr;
++	}
++
++	if (p + p->s.size == bp) {
++		p->s.size += bp->s.size;
++		p->s.ptr = bp->s.ptr;
++	} else {
++		p->s.ptr = bp;
++	}
++
++	freep = p;
++}
+diff --git a/13-CorruptContext/malloc.h b/13-CorruptContext/malloc.h
+new file mode 100644
+index 0000000..722f168
+--- /dev/null
++++ b/13-CorruptContext/malloc.h
+@@ -0,0 +1,7 @@
++#ifndef __MALLOC_H_
++#define __MALLOC_H_
++
++void *malloc(unsigned int nbytes);
++void free(void *ap);
++
++#endif
+diff --git a/13-CorruptContext/my_malloc.c b/13-CorruptContext/my_malloc.c
+new file mode 100644
+index 0000000..4ae9d5c
+--- /dev/null
++++ b/13-CorruptContext/my_malloc.c
+@@ -0,0 +1,102 @@
++#include <stddef.h>
++#include "my_malloc.h"
++#include "os.h"
++
++typedef long Align;
++
++union header {
++	struct {
++		union header *ptr;
++		unsigned int size;
++	} s;
++	Align x;
++};
++
++typedef union header Header;
++
++static unsigned char heaps[MAX_HEAPS];
++static unsigned char *program_break = heaps;
++
++static Header base; /* empty list to get started */
++static Header *my_freep = NULL; /* start of my_free list */
++
++static void *sbrk(unsigned int nbytes)
++{
++	if (program_break + nbytes >= heaps
++	    && program_break + nbytes < heaps + MAX_HEAPS) {
++		unsigned char *previous_pb = program_break;
++		program_break += nbytes;
++		return (void *) previous_pb;
++	}
++	return (void *) -1;
++}
++
++void *my_malloc(unsigned int nbytes)
++{
++	Header *p, *prevp;
++	unsigned int nunits;
++	void *cp;
++
++	nunits = (nbytes + sizeof(Header) - 1) / sizeof(Header) + 1;
++
++	if ((prevp = my_freep) == NULL) {
++		base.s.ptr = my_freep = prevp = &base;
++		base.s.size = 0;
++	}
++
++	for (p = prevp->s.ptr; ; prevp = p, p = p->s.ptr) {
++		if (p->s.size >= nunits) {
++			if (p->s.size == nunits) {
++				prevp->s.ptr = p->s.ptr;
++			} else {
++				p->s.size -= nunits;
++				p += p->s.size;
++				p->s.size = nunits;
++			}
++			my_freep = prevp;
++                        #ifdef KLEE
++                        printf("my_malloc allocating %d bytes at %p\n",nbytes,p+1);
++                        #endif
++			return (void *)(p + 1);
++		}
++
++		if (p == my_freep) {
++			cp = sbrk(nunits * sizeof(Header));
++			if (cp == (void *) -1) {
++				return NULL;
++			} else {
++				p = (Header *) cp;
++				p->s.size = nunits;
++				my_free((void *) (p + 1));
++				p = my_freep;
++			}
++		}
++	}
++}
++
++void my_free(void *ap)
++{
++	Header *bp, *p;
++	bp = (Header *) ap - 1;
++
++	for (p = my_freep; !(bp > p && bp < p->s.ptr); p = p->s.ptr) {
++		if (p >= p->s.ptr && (bp > p || bp < p->s.ptr))
++			break;
++	}
++
++	if (bp + bp->s.size == p->s.ptr) {
++		bp->s.size += p->s.ptr->s.size;
++		bp->s.ptr = p->s.ptr->s.ptr;
++	} else {
++		bp->s.ptr = p->s.ptr;
++	}
++
++	if (p + p->s.size == bp) {
++		p->s.size += bp->s.size;
++		p->s.ptr = bp->s.ptr;
++	} else {
++		p->s.ptr = bp;
++	}
++
++	my_freep = p;
++}
+diff --git a/13-CorruptContext/my_malloc.h b/13-CorruptContext/my_malloc.h
+new file mode 100644
+index 0000000..de2182a
+--- /dev/null
++++ b/13-CorruptContext/my_malloc.h
+@@ -0,0 +1,7 @@
++#ifndef __MALLOC_H_
++#define __MALLOC_H_
++
++void *my_malloc(unsigned int nbytes);
++void my_free(void *ap);
++
++#endif
+diff --git a/13-CorruptContext/os.c b/13-CorruptContext/os.c
+new file mode 100644
+index 0000000..56409d3
+--- /dev/null
++++ b/13-CorruptContext/os.c
+@@ -0,0 +1,142 @@
++#include <stddef.h>
++#include <stdint.h>
++#include "reg.h"
++#include "threads.h"
++
++/* USART TXE Flag
++ * This flag is cleared when data is written to USARTx_DR and
++ * set when that data is transferred to the TDR
++ */
++//#define USART_FLAG_TXE	((uint16_t) 0x0080)
++//
++//void usart_init(void)
++//{
++//	*(RCC_APB2ENR) |= (uint32_t) (0x00000001 | 0x00000004);
++//	*(RCC_APB1ENR) |= (uint32_t) (0x00020000);
++//
++//	/* USART2 Configuration, Rx->PA3, Tx->PA2 */
++//	*(GPIOA_CRL) = 0x00004B00;
++//	*(GPIOA_CRH) = 0x44444444;
++//	*(GPIOA_ODR) = 0x00000000;
++//	*(GPIOA_BSRR) = 0x00000000;
++//	*(GPIOA_BRR) = 0x00000000;
++//
++//	*(USART2_CR1) = 0x0000000C;
++//	*(USART2_CR2) = 0x00000000;
++//	*(USART2_CR3) = 0x00000000;
++//	*(USART2_CR1) |= 0x2000;
++//}
++
++void print_str(const char *str)
++{
++   #ifdef KLEE
++   printf("%s",str);
++   #endif
++//	while (*str) {
++//		while (!(*(USART2_SR) & USART_FLAG_TXE));
++//		*(USART2_DR) = (*str & 0xFF);
++//		str++;
++//	}
++}
++
++static void delay(volatile int count)
++{
++	count *= 1;//50000;
++	while (count--){
++                #ifdef KLEE
++                inception_raise_irq(15);
++                #endif
++        }
++}
++
++static void busy_loop(void *str)
++{
++	while (1) {
++		print_str(str);
++		print_str(": Running...\n");
++		delay(10);
++		print_str(str);
++		print_str(": Returning...\n");
++	}
++}
++
++void test1(void *userdata)
++{
++	busy_loop(userdata);
++}
++
++void test2(void *userdata)
++{
++	busy_loop(userdata);
++}
++
++void test3(void *userdata)
++{
++	busy_loop(userdata);
++}
++
++/* 72MHz */
++#define CPU_CLOCK_HZ 72000000
++
++/* 100 ms per tick. */
++#define TICK_RATE_HZ 10
++
++
++void print(int *p){
++  #ifdef KLEE
++  printf("&i = %p\n",p);
++  #endif
++}
++
++void vulnerable(){
++  __asm volatile("nop");
++  corrupt();
++}
++
++void UART4_IRQHandler(void){
++  int untrusted_uart_in = 1;
++  #ifdef KLEE
++  printf("UART4 handler\n");
++  //klee_make_symbolic(&untrusted_uart_in,sizeof(untrusted_uart_in),"untrusted_uart_in");
++  #endif
++  if(untrusted_uart_in == 1){
++    #ifdef KLEE
++    printf("vulnerable\n");
++    #endif
++    vulnerable();
++  }
++}
++
++int main(void)
++{
++	const char *str1 = "Task1", *str2 = "Task2", *str3 = "Task3";
++
++	//usart_init();
++
++        print_str("main creating Task 1\r\n");
++	if (thread_create(test1, (void *) str1) == -1)
++		print_str("Thread 1 creation failed\r\n");
++
++        print_str("main creating Task 2\r\n");
++	if (thread_create(test2, (void *) str2) == -1)
++		print_str("Thread 2 creation failed\r\n");
++
++        print_str("main creating Task 3\r\n");
++	if (thread_create(test3, (void *) str3) == -1)
++		print_str("Thread 3 creation failed\r\n");
++
++        dump();
++        #ifdef KLEE
++        inception_raise_irq(64);
++        #endif
++        dump();
++        ///* SysTick configuration */
++	//*SYSTICK_LOAD = (CPU_CLOCK_HZ / TICK_RATE_HZ) - 1UL;
++	//*SYSTICK_VAL = 0;
++	//*SYSTICK_CTRL = 0x07;
++        //while(1);
++        print_str("main starting Tasks\r\n");
++	thread_start();
++
++	return 0;
++}
+diff --git a/13-CorruptContext/os.h b/13-CorruptContext/os.h
+new file mode 100644
+index 0000000..910d979
+--- /dev/null
++++ b/13-CorruptContext/os.h
+@@ -0,0 +1,8 @@
++#ifndef __OS_H_
++#define __OS_H_
++
++#define MAX_TASKS 10
++#define STACK_SIZE 256
++#define MAX_HEAPS 4096
++
++#endif
+diff --git a/13-CorruptContext/os.ld b/13-CorruptContext/os.ld
+new file mode 100644
+index 0000000..a3447c0
+--- /dev/null
++++ b/13-CorruptContext/os.ld
+@@ -0,0 +1,46 @@
++ENTRY(reset_handler)
++
++MEMORY
++{
++	FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 128K
++	RAM (rwx) : ORIGIN = 0x20000000, LENGTH = 40K
++}
++
++SECTIONS
++{
++        .interrupt_vector = ORIGIN(FLASH);
++
++	.text :
++	{
++		KEEP(*(.isr_vector))
++		*(.text)
++		*(.text.*)
++		*(.rodata)
++		_sromdev = .;
++		_eromdev = .;
++		_sidata = .;
++	} >FLASH
++
++	.data : AT(_sidata)
++	{
++		_sdata = .;
++		*(.data)
++		*(.data*)
++		_edata = .;
++	} >RAM
++
++	.bss :
++	{
++		_sbss = .;
++		*(.bss)
++		_ebss = .;
++	} >RAM
++
++	.stack :
++	{
++          _sstack = .;
++          . = . + ORIGIN(RAM) + LENGTH(RAM) - _ebss;
++          _estack = .;
++	} >RAM
++
++}
+diff --git a/13-CorruptContext/reg.h b/13-CorruptContext/reg.h
+new file mode 100644
+index 0000000..4e7c57a
+--- /dev/null
++++ b/13-CorruptContext/reg.h
+@@ -0,0 +1,56 @@
++#ifndef __REG_H_
++#define __REG_H_
++
++#define __REG_TYPE	volatile uint32_t
++#define __REG		__REG_TYPE *
++
++#define SCS_BASE                        (uint32_t) (0xE000E000)
++#define SCB_BASE                        (SCS_BASE + 0x0D00)
++#define SCB_ICSR                        (volatile uint32_t *) (SCB_BASE + 0x004)
++#define SCB_ICSR_PENDSVSET              (uint32_t) (1 << 28)
++
++/* RCC Memory Map */
++#define RCC		((__REG_TYPE) 0x40021000)
++#define RCC_CR		((__REG) (RCC + 0x00))
++#define RCC_CFGR	((__REG) (RCC + 0x04))
++#define RCC_CIR		((__REG) (RCC + 0x08))
++#define RCC_APB2RSTR	((__REG) (RCC + 0x0C))
++#define RCC_APB1RSTR	((__REG) (RCC + 0x10))
++#define RCC_AHBENR	((__REG) (RCC + 0x14))
++#define RCC_APB2ENR	((__REG) (RCC + 0x18))
++#define RCC_APB1ENR	((__REG) (RCC + 0x1C))
++#define RCC_BDCR	((__REG) (RCC + 0x20))
++#define RCC_CSR		((__REG) (RCC + 0x24))
++
++/* Flash Memory Map */
++#define FLASH		((__REG_TYPE) 0x40022000)
++#define FLASH_ACR	((__REG) (FLASH + 0x00))
++
++/* GPIO Memory Map */
++#define GPIOA		((__REG_TYPE) 0x40010800)
++#define GPIOA_CRL	((__REG) (GPIOA + 0x00))
++#define GPIOA_CRH	((__REG) (GPIOA + 0x04))
++#define GPIOA_IDR	((__REG) (GPIOA + 0x08))
++#define GPIOA_ODR	((__REG) (GPIOA + 0x0C))
++#define GPIOA_BSRR	((__REG) (GPIOA + 0x10))
++#define GPIOA_BRR	((__REG) (GPIOA + 0x14))
++#define GPIOA_LCKR	((__REG) (GPIOA + 0x18))
++
++/* USART2 Memory Map */
++#define USART2		((__REG_TYPE) 0x40004400)
++#define USART2_SR	((__REG) (USART2 + 0x00))
++#define USART2_DR	((__REG) (USART2 + 0x04))
++#define USART2_BRR	((__REG) (USART2 + 0x08))
++#define USART2_CR1	((__REG) (USART2 + 0x0C))
++#define USART2_CR2	((__REG) (USART2 + 0x10))
++#define USART2_CR3	((__REG) (USART2 + 0x14))
++#define USART2_GTPR	((__REG) (USART2 + 0x18))
++
++/* SysTick Memory Map */
++#define SYSTICK		((__REG_TYPE) 0xE000E010)
++#define SYSTICK_CTRL	((__REG) (SYSTICK + 0x00))
++#define SYSTICK_LOAD	((__REG) (SYSTICK + 0x04))
++#define SYSTICK_VAL	((__REG) (SYSTICK + 0x08))
++#define SYSTICK_CALIB	((__REG) (SYSTICK + 0x0C))
++
++#endif
+diff --git a/13-CorruptContext/registers.dump b/13-CorruptContext/registers.dump
+new file mode 100644
+index 0000000..6e95447
+--- /dev/null
++++ b/13-CorruptContext/registers.dump
+@@ -0,0 +1,147 @@
++.stack
++	address: 536875180
++	value[0]: 0
++	next: object at 536903360 of size 4
++		MO24[4] allocated at global:_estack
++	prev: object at 536875180 of size 28180
++		MO59[28180] allocated at global:.stack
++CF
++	address: 4026532520
++	value[0]: 0
++	next: object at 4026532540 of size 4
++		MO52[4] allocated at global:CPSR
++	prev: object at 4026532520 of size 4
++		MO51[4] allocated at global:CF
++LR
++	address: 4026532400
++	value[0]: 134217892
++	next: object at 4026532420 of size 4
++		MO46[4] allocated at global:R3
++	prev: object at 4026532400 of size 4
++		MO45[4] allocated at global:LR
++NF
++	address: 4026532480
++	value[0]: 0
++	next: object at 4026532500 of size 4
++		MO50[4] allocated at global:ZF
++	prev: object at 4026532480 of size 4
++		MO49[4] allocated at global:NF
++PC
++	address: 4026532580
++	value[0]: 134217892
++	next: object at 4026532600 of size 4
++		MO55[4] allocated at global:APSR
++	prev: object at 4026532580 of size 4
++		MO54[4] allocated at global:PC
++R0
++	address: 4026532240
++	value[0]: 4026531853
++	next: object at 4026532260 of size 4
++		MO38[4] allocated at global:R4
++	prev: object at 4026532240 of size 4
++		MO37[4] allocated at global:R0
++R1
++	address: 4026532460
++	value[0]: 536875056
++	next: object at 4026532480 of size 4
++		MO49[4] allocated at global:NF
++	prev: object at 4026532460 of size 4
++		MO48[4] allocated at global:R1
++R10
++	address: 4026532360
++	value[0]: 2880154539
++	next: object at 4026532380 of size 4
++		MO44[4] allocated at global:R11
++	prev: object at 4026532360 of size 4
++		MO43[4] allocated at global:R10
++R11
++	address: 4026532380
++	value[0]: 2880154539
++	next: object at 4026532400 of size 4
++		MO45[4] allocated at global:LR
++	prev: object at 4026532380 of size 4
++		MO44[4] allocated at global:R11
++R12
++	address: 4026532640
++	value[0]: 0
++	next: object at 4026532660 of size 4
++		MO58[4] allocated at global:CONTROL_1
++	prev: object at 4026532640 of size 4
++		MO57[4] allocated at global:R12
++R2
++	address: 4026532440
++	value[0]: 0
++	next: object at 4026532460 of size 4
++		MO48[4] allocated at global:R1
++	prev: object at 4026532440 of size 4
++		MO47[4] allocated at global:R2
++R3
++	address: 4026532420
++	value[0]: 4026534200
++	next: object at 4026532440 of size 4
++		MO47[4] allocated at global:R2
++	prev: object at 4026532420 of size 4
++		MO46[4] allocated at global:R3
++R4
++	address: 4026532260
++	value[0]: 2880154539
++	next: object at 4026532280 of size 4
++		MO39[4] allocated at global:R5
++	prev: object at 4026532260 of size 4
++		MO38[4] allocated at global:R4
++R5
++	address: 4026532280
++	value[0]: 2880154539
++	next: object at 4026532300 of size 4
++		MO40[4] allocated at global:R6
++	prev: object at 4026532280 of size 4
++		MO39[4] allocated at global:R5
++R6
++	address: 4026532300
++	value[0]: 2880154539
++	next: object at 4026532320 of size 4
++		MO41[4] allocated at global:R8
++	prev: object at 4026532300 of size 4
++		MO40[4] allocated at global:R6
++R7
++	address: 4026532180
++	value[0]: 2880154539
++	next: object at 4026532200 of size 4
++		MO35[4] allocated at global:SP
++	prev: object at 4026532180 of size 4
++		MO34[4] allocated at global:R7
++R8
++	address: 4026532320
++	value[0]: 2880154539
++	next: object at 4026532340 of size 4
++		MO42[4] allocated at global:R9
++	prev: object at 4026532320 of size 4
++		MO41[4] allocated at global:R8
++R9
++	address: 4026532340
++	value[0]: 2880154539
++	next: object at 4026532360 of size 4
++		MO43[4] allocated at global:R10
++	prev: object at 4026532340 of size 4
++		MO42[4] allocated at global:R9
++SP
++	address: 4026532200
++	value[0]: 4026534240
++	next: object at 4026532220 of size 4
++		MO36[4] allocated at global:PSP
++	prev: object at 4026532200 of size 4
++		MO35[4] allocated at global:SP
++VF
++	address: 4026532560
++	value[0]: 0
++	next: object at 4026532580 of size 4
++		MO54[4] allocated at global:PC
++	prev: object at 4026532560 of size 4
++		MO53[4] allocated at global:VF
++ZF
++	address: 4026532500
++	value[0]: 1
++	next: object at 4026532520 of size 4
++		MO51[4] allocated at global:CF
++	prev: object at 4026532500 of size 4
++		MO50[4] allocated at global:ZF
+diff --git a/13-CorruptContext/startup.c b/13-CorruptContext/startup.c
+new file mode 100644
+index 0000000..7765c2d
+--- /dev/null
++++ b/13-CorruptContext/startup.c
+@@ -0,0 +1,162 @@
++#include <stdint.h>
++#include "reg.h"
++
++/* Bit definition for RCC_CR register */
++#define RCC_CR_HSION	((uint32_t) 0x00000001)		/*!< Internal High Speed clock enable */
++#define RCC_CR_HSEON	((uint32_t) 0x00010000)		/*!< External High Speed clock enable */
++#define RCC_CR_HSERDY	((uint32_t) 0x00020000)		/*!< External High Speed clock ready flag */
++#define RCC_CR_CSSON	((uint32_t) 0x00080000)		/*!< Clock Security System enable */
++
++/* Bit definition for RCC_CFGR register */
++#define  RCC_CFGR_SW		((uint32_t) 0x00000003)	/*!< SW[1:0] bits (System clock Switch) */
++#define  RCC_CFGR_SW_HSE	((uint32_t) 0x00000001)	/*!< HSE selected as system clock */
++#define  RCC_CFGR_SWS		((uint32_t) 0x0000000C)	/*!< SWS[1:0] bits (System Clock Switch Status) */
++#define  RCC_CFGR_HPRE_DIV1	((uint32_t) 0x00000000)	/*!< SYSCLK not divided */
++#define  RCC_CFGR_PPRE1_DIV1	((uint32_t) 0x00000000)	/*!< HCLK not divided */
++#define  RCC_CFGR_PPRE2_DIV1	((uint32_t) 0x00000000)	/*!< HCLK not divided */
++
++/* Bit definition for FLASH_ACR register */
++#define FLASH_ACR_LATENCY	((uint8_t) 0x03)	/*!< LATENCY[2:0] bits (Latency) */
++#define FLASH_ACR_LATENCY_0	((uint8_t) 0x00)	/*!< Bit 0 */
++#define FLASH_ACR_PRFTBE	((uint8_t) 0x10)	/*!< Prefetch Buffer Enable */
++
++#define HSE_STARTUP_TIMEOUT	((uint16_t) 0x0500)	/*!< Time out for HSE start up */
++
++/* main program entry point */
++extern void main(void);
++
++/* start address for the initialization values of the .data section.
++ * defined in linker script */
++/*extern*/ uint32_t _sidata;
++/* start address for the .data section. defined in linker script */
++/*extern*/ uint32_t _sdata;
++/* end address for the .data section. defined in linker script */
++/*extern*/ uint32_t _edata;
++/* start address for the .bss section. defined in linker script */
++/*extern*/ uint32_t _sbss;
++/* end address for the .bss section. defined in linker script */
++/*extern*/ uint32_t _ebss;
++/* end address for the stack. defined in linker script */
++/*extern*/ uint32_t _estack;
++
++void rcc_clock_init(void);
++
++void reset_handler(void)
++{
++	/* Copy the data segment initializers from flash to SRAM */
++	uint32_t *idata_begin = &_sidata;
++	uint32_t *data_begin = &_sdata;
++	uint32_t *data_end = &_edata;
++	while (data_begin < data_end) *data_begin++ = *idata_begin++;
++
++	/* Zero fill the bss segment. */
++	uint32_t *bss_begin = &_sbss;
++	uint32_t *bss_end = &_ebss;
++	while (bss_begin < bss_end) *bss_begin++ = 0;
++
++	/* Clock system intitialization */
++	rcc_clock_init();
++
++	main();
++}
++
++void default_handler(void)
++{
++	while (1)
++		/* no operation */ ;
++}
++
++void nmi_handler(void) __attribute((weak, alias("default_handler")));
++void hardfault_handler(void) __attribute((weak, alias("default_handler")));
++void memmanage_handler(void) __attribute((weak, alias("default_handler")));
++void busfault_handler(void) __attribute((weak, alias("default_handler")));
++void usagefault_handler(void) __attribute((weak, alias("default_handler")));
++void svc_handler(void) __attribute((weak, alias("default_handler")));
++void pendsv_handler(void) __attribute((weak, alias("default_handler")));
++void systick_handler(void) __attribute((weak, alias("default_handler")));
++void UART4_IRQHandler(void) __attribute((weak, alias("default_handler")));
++
++__attribute((section(".isr_vector")))
++uint32_t *isr_vectors[] = {
++	[0x00] = (uint32_t *) &_estack,			/* stack pointer */
++	[0x01] = (uint32_t *) reset_handler,		/* code entry point */
++	[0x02] = (uint32_t *) nmi_handler,		/* NMI handler */
++	[0x03] = (uint32_t *) hardfault_handler,	/* hard fault handler */
++	[0x04] = (uint32_t *) memmanage_handler,	/* mem manage handler */
++	[0x05] = (uint32_t *) busfault_handler,		/* bus fault handler */
++	[0x06] = (uint32_t *) usagefault_handler,	/* usage fault handler */
++	[0x0B] = (uint32_t *) svc_handler,		/* svc handler */
++	[0x0E] = (uint32_t *) pendsv_handler,		/* pendsv handler */
++	[0x0F] = (uint32_t *) systick_handler,		/* systick handler */
++	[64]   = (uint32_t *) UART4_IRQHandler
++};
++
++void rcc_clock_init(void)
++{
++	/* Reset the RCC clock configuration to the default reset state(for debug purpose) */
++	/* Set HSION bit */
++	*RCC_CR |= (uint32_t) 0x00000001;
++
++	/* Reset SW, HPRE, PPRE1, PPRE2, ADCPRE and MCO bits */
++	*RCC_CFGR &= (uint32_t) 0xF8FF0000;
++
++	/* Reset HSEON, CSSON and PLLON bits */
++	*RCC_CR &= (uint32_t) 0xFEF6FFFF;
++
++	/* Reset HSEBYP bit */
++	*RCC_CR &= (uint32_t) 0xFFFBFFFF;
++
++	/* Reset PLLSRC, PLLXTPRE, PLLMUL and USBPRE/OTGFSPRE bits */
++	*RCC_CFGR &= (uint32_t) 0xFF80FFFF;
++
++	/* Disable all interrupts and clear pending bits  */
++	*RCC_CIR = 0x009F0000;
++
++	/* Configure the System clock frequency, HCLK, PCLK2 and PCLK1 prescalers */
++	/* Configure the Flash Latency cycles and enable prefetch buffer */
++	volatile uint32_t StartUpCounter = 0, HSEStatus = 0;
++
++	/* SYSCLK, HCLK, PCLK2 and PCLK1 configuration ---------------------------*/
++	/* Enable HSE */
++	*RCC_CR |= ((uint32_t)RCC_CR_HSEON);
++
++	/* Wait till HSE is ready and if Time out is reached exit */
++	do {
++		HSEStatus = *RCC_CR & RCC_CR_HSERDY;
++		StartUpCounter++;
++	} while ((HSEStatus == 0) && (StartUpCounter != HSE_STARTUP_TIMEOUT));
++
++	if ((*RCC_CR & RCC_CR_HSERDY) != 0)
++		HSEStatus = (uint32_t) 0x01;
++	else
++		HSEStatus = (uint32_t) 0x00;
++
++	if (HSEStatus == (uint32_t) 0x01) {
++		/* Enable Prefetch Buffer */
++		*FLASH_ACR |= FLASH_ACR_PRFTBE;
++
++		/* Flash 0 wait state */
++		*FLASH_ACR &= (uint32_t)((uint32_t) ~FLASH_ACR_LATENCY);
++
++		*FLASH_ACR |= (uint32_t) FLASH_ACR_LATENCY_0;
++
++		/* HCLK = SYSCLK */
++		*RCC_CFGR |= (uint32_t) RCC_CFGR_HPRE_DIV1;
++
++		/* PCLK2 = HCLK */
++		*RCC_CFGR |= (uint32_t) RCC_CFGR_PPRE2_DIV1;
++
++		/* PCLK1 = HCLK */
++		*RCC_CFGR |= (uint32_t) RCC_CFGR_PPRE1_DIV1;
++
++		/* Select HSE as system clock source */
++		*RCC_CFGR &= (uint32_t)((uint32_t) ~(RCC_CFGR_SW));
++		*RCC_CFGR |= (uint32_t) RCC_CFGR_SW_HSE;
++
++		/* Wait till HSE is used as system clock source */
++		while ((*RCC_CFGR & (uint32_t) RCC_CFGR_SWS) != (uint32_t) 0x04);
++	} else {
++		/* If HSE fails to start-up, the application will have wrong clock
++		configuration. User can add here some code to deal with this error */
++	}
++}
+diff --git a/13-CorruptContext/threads.c b/13-CorruptContext/threads.c
+new file mode 100644
+index 0000000..b717efc
+--- /dev/null
++++ b/13-CorruptContext/threads.c
+@@ -0,0 +1,158 @@
++#include <stdint.h>
++#include "threads.h"
++#include "os.h"
++#include "malloc.h"
++#include "reg.h"
++
++#define THREAD_PSP	0xFFFFFFFD
++
++/* Thread Control Block */
++typedef struct {
++	void *stack;
++	void *orig_stack;
++	uint8_t in_use;
++} tcb_t;
++
++static tcb_t tasks[MAX_TASKS];
++static int lastTask;
++static int first = 1;
++
++void dump(void){
++        #ifdef KLEE
++        int *sp = tasks[lastTask].stack;
++        printf("LAST TH STACK PC: address %p\n",&sp[8]);
++        printf("LAST TH STACK PC: value %p\n",sp[8]);
++        #endif
++}
++
++void corrupt(void){
++        int *sp = tasks[lastTask].stack;
++        sp[8] = 0xdeadbeef;
++}
++
++/* FIXME: Without naked attribute, GCC will corrupt r7 which is used for stack
++ * pointer. If so, after restoring the tasks' context, we will get wrong stack
++ * pointer.
++ */
++int found = 1;
++void /*__attribute__((naked))*/ pendsv_handler()
++{
++	asm volatile("pop {r7}\n");
++
++	/* Save the old task's context */
++	asm volatile("mrs   r0, psp\n"
++	             "stmdb r0!, {r4-r11, lr}\n");
++	/* To get the task pointer address from result r0 */
++	asm volatile("mov   %0, r0\n" : "=r" (tasks[lastTask].stack));
++
++	/* Find a new task to run */
++        found = 0;
++	while (!found) {
++		lastTask++;
++		if (lastTask == MAX_TASKS)
++			lastTask = 0;
++		if (tasks[lastTask].in_use)
++                        found = 1;
++        }
++
++        /* Move the task's stack pointer address into r0 */
++        asm volatile("mov r0, %0\n" : : "r" (tasks[lastTask].stack));
++        /* Restore the new task's context and jump to the task */
++        asm volatile("ldmia r0!, {r4-r11, lr}\n"
++                    "msr psp, r0\n"
++                    "bx lr\n");
++
++}
++
++void systick_handler()
++{
++	//*SCB_ICSR |= SCB_ICSR_PENDSVSET;
++        #ifdef KLEE
++        inception_raise_irq(14);
++        #endif
++}
++
++void thread_start()
++{
++	lastTask = 0;
++
++	/* Save kernel context */
++	asm volatile("mrs ip, psr\n"
++	             "push {r4-r11, ip, lr}\n");
++
++	/* To bridge the variable in C and the register in ASM,
++	 * move the task's stack pointer address into r0.
++	 * http://www.ethernut.de/en/documents/arm-inline-asm.html
++	 */
++	asm volatile("mov r0, %0\n" : : "r" (tasks[lastTask].stack));
++	/* Load user task's context and jump to the task */
++	asm volatile("msr psp, r0\n"
++	             "mov r0, #3\n"
++	             "msr control, r0\n"
++	             "isb\n"
++	             "pop {r4-r11, lr}\n"
++	             "pop {r0}\n"
++	             //"bx lr\n");
++	             "blx lr\n");
++}
++
++int thread_create(void (*run)(void *), void *userdata)
++{
++	/* Find a free thing */
++	int threadId = 0;
++	uint32_t *stack;
++
++	for (threadId = 0; threadId < MAX_TASKS; threadId++) {
++		if (tasks[threadId].in_use == 0)
++			break;
++	}
++
++	if (threadId == MAX_TASKS)
++		return -1;
++
++	/* Create the stack */
++	stack = (uint32_t *) malloc(STACK_SIZE * sizeof(uint32_t));
++	tasks[threadId].orig_stack = stack;
++	if (stack == 0)
++		return -1;
++
++	stack += STACK_SIZE - 32; /* End of stack, minus what we are about to push */
++	if (first) {
++		stack[8] = (unsigned int) run;
++		stack[9] = (unsigned int) userdata;
++		first = 0;
++	} else {
++		stack[8] = (unsigned int) THREAD_PSP;
++		stack[9] = (unsigned int) userdata;
++		stack[14] = (unsigned) &thread_self_terminal;
++		stack[15] = (unsigned int) run;
++		stack[16] = (unsigned int) 0x01000000; /* PSR Thumb bit */
++	}
++
++	/* Construct the control block */
++	tasks[threadId].stack = stack;
++	tasks[threadId].in_use = 1;
++
++	return threadId;
++}
++
++void thread_kill(int thread_id)
++{
++	tasks[thread_id].in_use = 0;
++
++	/* Free the stack */
++	free(tasks[thread_id].orig_stack);
++}
++
++void thread_self_terminal()
++{
++	/* This will kill the stack.
++	 * For now, disable context switches to save ourselves.
++	 */
++	asm volatile("cpsid i\n");
++	thread_kill(lastTask);
++	asm volatile("cpsie i\n");
++
++	/* And now wait for death to kick in */
++	//while (1);
++}
+diff --git a/13-CorruptContext/threads.h b/13-CorruptContext/threads.h
+new file mode 100644
+index 0000000..38631da
+--- /dev/null
++++ b/13-CorruptContext/threads.h
+@@ -0,0 +1,11 @@
++#ifndef __THREADS_H__
++#define __THREADS_H__
++
++void thread_start();
++int thread_create(void (*run)(void *), void *userdata);
++void thread_kill(int thread_id);
++void thread_self_terminal();
++void dump();
++void corrupt();
++
++#endif
+diff --git a/13-CorruptContext/version.md b/13-CorruptContext/version.md
+new file mode 100644
+index 0000000..b7bbaed
+--- /dev/null
++++ b/13-CorruptContext/version.md
+@@ -0,0 +1,5 @@
++Analyzer 41ea9eaed20e907ff8dfc525bd188c2e6d668a4
++with collision desactivated
++
++Compiler c9a1aac28b749faace5705fe475a15828963077c
++
+diff --git "a/13-CorruptContext/\303\271" "b/13-CorruptContext/\303\271"
+new file mode 100644
+index 0000000..fbc040e
+--- /dev/null
++++ "b/13-CorruptContext/\303\271"
+@@ -0,0 +1,46 @@
++CROSS_COMPILE ?= arm-none-eabi-
++CC := $(CROSS_COMPILE)gcc
++AS := $(CROSS_COMPILE)as
++CFLAGS = -fno-common -ffreestanding -O0 \
++	 -gdwarf-2 -g3 -Wall -Werror \
++	 -mcpu=cortex-m3 -mthumb \
++	 -Wl,-Tos.ld -nostartfiles \
++         -I.
++
++DET_ALLOC_START = 0xf0000000
++
++TARGET = os
++
++LLVM-AS = llvm-as
++INCEPTION-CL = inception-cl
++CLANG = clang
++CLANG_FLAGS = -mthumb --target=thumbv7m-eabi -mcpu=cortex-m3
++CLANG_FLAGS += -I. -emit-llvm -g -S -DKLEE
++LLVM-LINK = llvm-link
++
++all: $(TARGET).bin $(TARGET)_merged.bc
++
++$(TARGET).bin: os.c startup.c malloc.c threads.c
++	$(CC) $(CFLAGS) $^ -o os.elf
++	$(CROSS_COMPILE)objcopy -Obinary os.elf os.bin
++	$(CROSS_COMPILE)objdump -S os.elf > os.list
++
++$(TARGET)_merged.bc: $(TARGET).bin
++	$(CLANG) $(CLANG_FLAGS)  os.c startup.c
++	$(LLVM-LINK) -S os.ll startup.ll malloc.ll threads.ll -o $(TARGET).ll
++	$(LLVM-AS) $(TARGET).ll -o $(TARGET).bc
++	$(INCEPTION-CL) $(INCEPTION_FLAGS) $(TARGET).elf $(TARGET).bc
++	$(LLVM-AS) $(TARGET).elf.ll -o $(TARGET)_merged.bc
++
++qemu: $(TARGET)
++	@qemu-system-arm -M ? | grep stm32-p103 >/dev/null || exit
++	@echo "Press Ctrl-A and then X to exit QEMU"
++	@echo
++	qemu-system-arm -M stm32-p103 -nographic -kernel os.bin
++
++clean:
++	rm -f *.o *.elf *.bin *.list *.elf.ll *.ll *.bc *.dis
++	rm -rf klee*
++
++run-klee: $(TARGET)_merged.bc
++	klee --allocate-determ --allocate-determ-start-address $(DET_ALLOC_START) $(TARGET)_merged.bc
+--
+2.7.4
